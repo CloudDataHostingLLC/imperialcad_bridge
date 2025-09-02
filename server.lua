@@ -103,11 +103,12 @@ local function isBadMake(s)
     return up == "UNKNOWN" or up == "UNK" or up == "N/A" or up == "NULL" or up == "NONE"
 end
 
--- strip leading year, remove agency suffixes, keep (Marked/Unmarked)
+-- strip leading year, remove agency suffixes, keep (Marked/Unmarked), drop Slicktop tokens
 local function normalizeModelLabel(label)
     local s = tostring(label or "")
-    s = s:gsub("^%s*([12]%d%d%d)[%s%-_]+", "")  -- remove leading year "2016 "
+    s = s:gsub("^%s*([12]%d%d%d)[%s%-_]+", "")  -- remove leading year like "2016 "
     local up = s:upper()
+
     local marked   = up:find("MARKED")   ~= nil
     local unmarked = up:find("UNMARKED") ~= nil
 
@@ -120,6 +121,8 @@ local function normalizeModelLabel(label)
         :gsub("%s+HP$", "")
         :gsub("%s+STATE%s+PATROL$", "")
         :gsub("%s+HIGHWAY%s+PATROL$", "")
+        :gsub("%s+SLICK[%-%s]*TOP", "")   -- Slicktop / Slick-Top
+        :gsub("%s+SLKT$", "")             -- shorthand
         :gsub("%s+MARKED", "")
         :gsub("%s+UNMARKED", "")
         :gsub("^%s+", "")
@@ -135,43 +138,54 @@ end
 local function guessMakeModel(displayLabel)
     local norm = normalizeModelLabel(displayLabel or "")
     local up   = norm:upper()
+
+    -- Explicit police platform mappings
+    if up:find("FPIS") then return "Ford", "FPIS" end          -- Ford Police Interceptor Sedan
+    if up:find("FPIU") then return "Ford", "FPIU" end          -- Ford Police Interceptor Utility
+
+    -- Existing mappings
     if up:find("EXPLORER") then
-        return "Ford", (up:find("MARKED") and "Explorer (Marked)") or (up:find("UNMARKED") and "Explorer (Unmarked)") or "Explorer"
+        return "Ford",
+            (up:find("MARKED") and "Explorer (Marked)")
+            or (up:find("UNMARKED") and "Explorer (Unmarked)")
+            or "Explorer"
     end
     if up:find("GRANGER")  then return "Declasse","Granger" end
-    if up:find("STANIER")  then return "Vapid","Stanier" end
-    if up:find("CHARGER")  then return "Dodge","Charger" end
-    if up:find("DURANGO")  then return "Dodge","Durango" end
+    if up:find("STANIER")  then return "Vapid","Stanier"   end
+    if up:find("CHARGER")  then return "Dodge","Charger"   end
+    if up:find("DURANGO")  then return "Dodge","Durango"   end
     if up:find("TAHOE")    then return "Chevrolet","Tahoe" end
     if up:find("IMPALA")   then return "Chevrolet","Impala" end
     if up:find("CROWN VIC") or up:find("CROWN VICTORIA") or up:find("CVPI") then
         return "Ford","Crown Victoria"
     end
-    local first = norm:match("^(%S+)")
-    if first then
-        local rest = norm:sub(#first+2)
-        if rest and #rest > 0 then return first, rest end
-    end
-    return "Declasse", (norm ~= "" and norm or "Granger")
+
+    -- No confident guess → don't override a provided make
+    return nil, nil
 end
 
 local function cleanMakeModel(rawMake, rawModel)
     local make  = tostring(rawMake or "")
     local model = tostring(rawModel or "")
+
+    -- If make is bad/missing, try to guess from model
     if isBadMake(make) or tonumber(make) then
-        return guessMakeModel(model)
-    end
-    if model == "" then
-        return make, "Unknown"
-    end
-    local normModel = normalizeModelLabel(model)
-    local gMake, gModel = guessMakeModel(normModel)
-    if gMake and gModel then
-        if gMake ~= make and (normModel:upper():find(gMake:upper()) or normModel:upper():find(gModel:upper())) then
+        local gMake, gModel = guessMakeModel(model)
+        if gMake and gModel then
             return gMake, gModel
         end
+        -- fallback tidy label
+        local norm = normalizeModelLabel(model)
+        return "Declasse", (norm ~= "" and norm or "Granger")
     end
-    return make, normModel
+
+    -- We have a decent make; normalize model and only override on confident guesses
+    local normModel = normalizeModelLabel(model)
+    local gMake, gModel = guessMakeModel(normModel)
+    if gMake and gModel and gMake ~= make and (normModel:upper():find(gMake:upper()) or normModel:upper():find(gModel:upper())) then
+        return gMake, gModel
+    end
+    return make, (normModel ~= "" and normModel or "Unknown")
 end
 
 -- ======================= Imperial lookup =======================
@@ -191,20 +205,20 @@ local function export_register_vehicle(ownerSSN, fields, cb)
         return cb(false, { note = "ImperialCAD not started" })
     end
 
-    local regDate = computeRegExpirationISO()  -- "YYYY-MM-DD" (string)
+    local regDate = computeRegExpirationISO()  -- "YYYY-MM-DD"
 
     local payload = {
         vehicleData = {
-            plate      = fields.plateCAD,   -- keep single space for CAD UI
+            plate      = fields.plateCAD,
             model      = fields.model,
             Make       = fields.Make,
             color      = fields.color,
             year       = fields.year,
-            vin        = fields.vin,        -- already A–Z/0–9 only
+            vin        = fields.vin,
             regState   = "KY",
             regStatus  = "Valid",
 
-            -- Expiration: cover ALL likely key names (all same ISO string)
+            -- (CAD's screen ignores these currently, but we send them anyway)
             regExpDate             = regDate,
             expirationDate         = regDate,
             RegExpDate             = regDate,
@@ -217,7 +231,6 @@ local function export_register_vehicle(ownerSSN, fields, cb)
             stolen     = false
         },
 
-        -- Some templates look here for expiration
         vehicleRegistration = {
             expDate        = regDate,
             expirationDate = regDate
@@ -244,7 +257,7 @@ local function export_register_vehicle(ownerSSN, fields, cb)
     end)
 end
 
--- ======================= Main event =======================
+-- ======================= Main event (new purchases) =======================
 RegisterNetEvent("imperialcad:registerVehicle", function(data)
     local src    = source
     local charid = getCitizenId(src)
@@ -253,7 +266,7 @@ RegisterNetEvent("imperialcad:registerVehicle", function(data)
         return
     end
 
-    -- Plate: keep ONE space for CAD; nospace for IDs
+    -- Plate formatting: keep ONE space for CAD; nospace for IDs
     local plateRaw     = tostring(data.plate or "")
     local plateTrim    = plateRaw:gsub("^%s+",""):gsub("%s+$","")
     local plateCAD     = plateTrim:gsub("%s+", " ")
@@ -293,21 +306,24 @@ end)
 -- ===================  /cadregister (existing plate)  ==================
 -- =====================================================================
 
--- Simple chat helper
 local function _sendChat(src, msg)
     TriggerClientEvent('chat:addMessage', src, { args = { '^3imperialcad', msg } })
 end
 
--- Query player's vehicle by plate (matches with or without spaces)
+-- Join dealership_vehicles on spawn_code to map spawn -> brand/model
 local function dbGetOwnedVehicleByPlate(citizenid, plate_input, cb)
     local nospace = (tostring(plate_input or "")):gsub("%s+", "")
     local sql = [[
-        SELECT *
-          FROM player_vehicles
-         WHERE citizenid = ?
+        SELECT pv.*,
+               dv.brand AS dv_brand,
+               dv.model AS dv_model
+          FROM player_vehicles pv
+          LEFT JOIN dealership_vehicles dv
+                 ON UPPER(dv.spawn_code) = UPPER(pv.vehicle)   -- spawn name match
+         WHERE pv.citizenid = ?
            AND (
-                UPPER(plate) = UPPER(?)
-             OR  REPLACE(UPPER(plate),' ','') = UPPER(?)
+                 UPPER(pv.plate) = UPPER(?)
+              OR REPLACE(UPPER(pv.plate),' ','') = UPPER(?)
            )
          LIMIT 1
     ]]
@@ -316,7 +332,6 @@ local function dbGetOwnedVehicleByPlate(citizenid, plate_input, cb)
     end)
 end
 
--- Build fields from DB row + player context and push to CAD
 local function registerExistingToCAD(src, row)
     local P = QBCore.Functions.GetPlayer(src)
     if not P then
@@ -325,19 +340,27 @@ local function registerExistingToCAD(src, row)
     end
     local charid  = P.PlayerData.citizenid
 
-    -- Plate formatting
     local plateDB      = tostring(row.plate or "")
     local plateTrim    = plateDB:gsub("^%s+",""):gsub("%s+$","")
     local plateCAD     = plateTrim:gsub("%s+", " ")
     local plateNoSpace = plateCAD:gsub("%s+","")
 
-    -- Pull what we can from DB; infer the rest
-    local dbModelLabel = tostring(row.vehicle or "")
-    local make, model  = cleanMakeModel(row.make or "", dbModelLabel)
-    local yearNum      = tonumber(row.year) or 2015
-    local colorIdx     = tonumber(row.color) or 0
-    local colorStr     = colorName(colorIdx)
-    local vin          = generateVIN(model, yearNum, plateNoSpace, charid)
+    -- Prefer dealership brand/model; fallback to spawn name in player_vehicles
+    local dv_brand = row.dv_brand
+    local dv_model_disp = row.dv_model
+    local make, model
+    if (dv_brand and dv_brand ~= "") or (dv_model_disp and dv_model_disp ~= "") then
+        make, model = cleanMakeModel(dv_brand or "", dv_model_disp or "")
+    else
+        local dbModelLabel = tostring(row.vehicle or "") -- spawn from player_vehicles
+        make, model = cleanMakeModel(row.make or "", dbModelLabel)
+    end
+
+    local yearNum  = tonumber(row.year) or 2015
+    local colorIdx = tonumber(row.color) or 0
+    local colorStr = colorName(colorIdx)
+
+    local vin = generateVIN(model, yearNum, plateNoSpace, charid)
 
     local fields = {
         plateCAD     = plateCAD,
@@ -364,7 +387,6 @@ local function registerExistingToCAD(src, row)
     end)
 end
 
--- /cadregister <plate>
 RegisterCommand('cadregister', function(source, args)
     local src = source
     if src == 0 then
@@ -391,15 +413,14 @@ RegisterCommand('cadregister', function(source, args)
         end
         registerExistingToCAD(src, row)
     end)
-end, false)  -- false = anyone can use; set to true if you want ACE
+end, false)
 
--- Optional: add a chat suggestion so players see usage
 CreateThread(function()
     TriggerClientEvent('chat:addSuggestion', -1, '/cadregister', 'Register an existing owned vehicle in CAD by plate', {
         { name = 'plate', help = 'Example: 123 ABC or 123ABC' },
     })
 end)
 
--- Optional ACE example (if you set the command to admin-only above):
+-- Optional ACE (if you set the command to admin-only):
 -- add_ace resource.imperialcad_bridge command.cadregister allow
 -- add_principal identifier.fivem:YOUR_IDENTIFIER group.admin
