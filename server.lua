@@ -288,3 +288,118 @@ RegisterNetEvent("imperialcad:registerVehicle", function(data)
         end)
     end)
 end)
+
+-- =====================================================================
+-- ===================  /cadregister (existing plate)  ==================
+-- =====================================================================
+
+-- Simple chat helper
+local function _sendChat(src, msg)
+    TriggerClientEvent('chat:addMessage', src, { args = { '^3imperialcad', msg } })
+end
+
+-- Query player's vehicle by plate (matches with or without spaces)
+local function dbGetOwnedVehicleByPlate(citizenid, plate_input, cb)
+    local nospace = (tostring(plate_input or "")):gsub("%s+", "")
+    local sql = [[
+        SELECT *
+          FROM player_vehicles
+         WHERE citizenid = ?
+           AND (
+                UPPER(plate) = UPPER(?)
+             OR  REPLACE(UPPER(plate),' ','') = UPPER(?)
+           )
+         LIMIT 1
+    ]]
+    exports.oxmysql:single(sql, { citizenid, plate_input, nospace }, function(row)
+        cb(row)
+    end)
+end
+
+-- Build fields from DB row + player context and push to CAD
+local function registerExistingToCAD(src, row)
+    local P = QBCore.Functions.GetPlayer(src)
+    if not P then
+        _sendChat(src, '^1Could not load your player data.')
+        return
+    end
+    local charid  = P.PlayerData.citizenid
+
+    -- Plate formatting
+    local plateDB      = tostring(row.plate or "")
+    local plateTrim    = plateDB:gsub("^%s+",""):gsub("%s+$","")
+    local plateCAD     = plateTrim:gsub("%s+", " ")
+    local plateNoSpace = plateCAD:gsub("%s+","")
+
+    -- Pull what we can from DB; infer the rest
+    local dbModelLabel = tostring(row.vehicle or "")
+    local make, model  = cleanMakeModel(row.make or "", dbModelLabel)
+    local yearNum      = tonumber(row.year) or 2015
+    local colorIdx     = tonumber(row.color) or 0
+    local colorStr     = colorName(colorIdx)
+    local vin          = generateVIN(model, yearNum, plateNoSpace, charid)
+
+    local fields = {
+        plateCAD     = plateCAD,
+        plateNoSpace = plateNoSpace,
+        model  = model,
+        Make   = make,
+        color  = colorStr,
+        year   = yearNum,
+        vin    = vin
+    }
+
+    fetchSSNByCitizenId(charid, function(numericSSN)
+        if not numericSSN then
+            _sendChat(src, '^1Could not resolve your CAD SSN; is your character set up in ImperialCAD?')
+            return
+        end
+        export_register_vehicle(numericSSN, fields, function(ok, _res)
+            if ok then
+                _sendChat(src, ('^2Registered plate ^7%s^2 to your CAD profile.'):format(plateCAD))
+            else
+                _sendChat(src, '^1Registration failed. Check server console for details.')
+            end
+        end)
+    end)
+end
+
+-- /cadregister <plate>
+RegisterCommand('cadregister', function(source, args)
+    local src = source
+    if src == 0 then
+        print('[imperialcad_bridge] /cadregister cannot be used from console.')
+        return
+    end
+    if not args[1] then
+        _sendChat(src, '^1Usage:^7 /cadregister <plate>')
+        return
+    end
+
+    local P = QBCore.Functions.GetPlayer(src)
+    if not P then
+        _sendChat(src, '^1Could not load your player.')
+        return
+    end
+    local citizenid = P.PlayerData.citizenid
+    local plateArg  = table.concat(args, ' ')  -- allow spaces in command
+
+    dbGetOwnedVehicleByPlate(citizenid, plateArg, function(row)
+        if not row then
+            _sendChat(src, ('^1No vehicle with plate ^7%s ^1found on your account.'):format(plateArg))
+            return
+        end
+        registerExistingToCAD(src, row)
+    end)
+end, false)  -- false = anyone can use; set to true if you want ACE
+
+-- Optional: add a chat suggestion so players see usage
+CreateThread(function()
+    TriggerClientEvent('chat:addSuggestion', -1, '/cadregister', 'Register an existing owned vehicle in CAD by plate', {
+        { name = 'plate', help = 'Example: 123 ABC or 123ABC' },
+    })
+end)
+
+-- Optional ACE example (if you set the command to admin-only above):
+-- add_ace resource.imperialcad_bridge command.cadregister allow
+-- add_principal identifier.fivem:YOUR_IDENTIFIER group.admin
