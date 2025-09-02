@@ -98,5 +98,5 @@ For reference, here’s what gets sent on registration:
 
 ## Credits
 
-- Integration by [imperialcad_bridge]  
+- Integration by Cloud Data Hosting Development Team  
 - VIN generator & Make/Model sanitizer written for this community setup.  
